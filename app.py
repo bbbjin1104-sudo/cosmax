@@ -4,6 +4,7 @@ import math
 import random
 from pathlib import Path
 
+import numpy as np
 import streamlit as st
 from PIL import Image, ImageDraw, ImageFilter
 
@@ -39,16 +40,18 @@ def _to_data_uri(img: Image.Image) -> str:
     return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("utf-8")
 
 
-def _blob_mask(size: int, cx: int, cy: int, rx: int, ry: int, seed: int) -> Image.Image:
+def _blob_mask(size: int, cx: int, cy: int, rx: int, ry: int, seed: int,
+                n_lumps: int = 8, dist_range=(0.15, 0.5), scale_range=(0.5, 0.75)) -> Image.Image:
     """찌그러진 여러 타원을 합쳐 자연스러운 뭉치 실루엣을 만든다."""
     rnd = random.Random(seed)
     mask = Image.new("L", (size, size), 0)
     draw = ImageDraw.Draw(mask)
     lumps = [(0, 0, 1.0, 1.0)]
-    for _ in range(8):
+    for _ in range(n_lumps):
         angle = rnd.uniform(0, math.tau)
-        dist = rnd.uniform(0.15, 0.5)
-        lumps.append((math.cos(angle) * dist, math.sin(angle) * dist, rnd.uniform(0.5, 0.75), rnd.uniform(0.5, 0.75)))
+        dist = rnd.uniform(*dist_range)
+        lumps.append((math.cos(angle) * dist, math.sin(angle) * dist,
+                      rnd.uniform(*scale_range), rnd.uniform(*scale_range)))
     for dx, dy, sx, sy in lumps:
         lx, ly = cx + dx * rx, cy + dy * ry
         draw.ellipse([lx - rx * sx, ly - ry * sy, lx + rx * sx, ly + ry * sy], fill=255)
@@ -56,72 +59,86 @@ def _blob_mask(size: int, cx: int, cy: int, rx: int, ry: int, seed: int) -> Imag
 
 
 @st.cache_data
-def make_rice_image() -> str:
-    """플랫한 이모지 대신, 낱알과 음영이 있는 흰 쌀밥 뭉치를 직접 그려서 base64로 반환한다."""
-    size, scale = 220, 3
+def make_dimsum_image() -> str:
+    """이모지 대신, 주름과 광택이 있는 찐만두(딤섬) 사진 느낌의 이미지를 그려서 base64로 반환한다."""
+    size, scale = 220, 4
     s = size * scale
-    cx, cy = s // 2, int(s * 0.55)
-    rx, ry = int(s * 0.40), int(s * 0.30)
+    cx, cy = s // 2, int(s * 0.56)
+    rx, ry = int(s * 0.37), int(s * 0.32)
 
     canvas = Image.new("RGBA", (s, s), (0, 0, 0, 0))
 
     shadow = Image.new("RGBA", (s, s), (0, 0, 0, 0))
     ImageDraw.Draw(shadow).ellipse(
-        [cx - rx * 0.8, cy + ry * 0.55, cx + rx * 0.8, cy + ry * 1.15], fill=(40, 20, 10, 120)
+        [cx - rx * 0.85, cy + ry * 0.55, cx + rx * 0.85, cy + ry * 1.2], fill=(35, 18, 8, 130)
     )
     canvas.alpha_composite(shadow.filter(ImageFilter.GaussianBlur(s * 0.03)))
 
-    mask = _blob_mask(s, cx, cy, rx, ry, seed=5)
+    mask = _blob_mask(s, cx, cy, rx, ry, seed=14, n_lumps=7,
+                       dist_range=(0.08, 0.28), scale_range=(0.78, 0.94))
 
-    grad = Image.new("L", (s, s), 128)
-    gdraw = ImageDraw.Draw(grad)
-    gdraw.ellipse([cx - rx * 1.4, cy - ry * 1.6, cx + rx * 0.4, cy + ry * 0.3], fill=210)
-    gdraw.ellipse([cx - rx * 0.3, cy - ry * 0.1, cx + rx * 1.5, cy + ry * 1.6], fill=70)
-    grad = grad.filter(ImageFilter.GaussianBlur(s * 0.1)).load()
+    yy, xx = np.mgrid[0:s, 0:s]
+    nx = (xx - (cx - rx * 0.35)) / (rx * 1.25)
+    ny = (yy - (cy - ry * 0.55)) / (ry * 1.25)
+    light = np.clip(1 - (nx ** 2 + ny ** 2), 0, 1) ** 1.3
 
-    warm, cool = (250, 246, 235), (205, 196, 174)
-    tone = Image.new("RGBA", (s, s), (0, 0, 0, 0))
-    tone_px = tone.load()
-    for y in range(0, s, 2):
-        for x in range(0, s, 2):
-            t = grad[x, y] / 255
-            rgba = (
-                int(cool[0] + (warm[0] - cool[0]) * t),
-                int(cool[1] + (warm[1] - cool[1]) * t),
-                int(cool[2] + (warm[2] - cool[2]) * t),
-                255,
-            )
-            for yy in (y, y + 1):
-                for xx in (x, x + 1):
-                    if xx < s and yy < s:
-                        tone_px[xx, yy] = rgba
+    nx2 = (xx - (cx + rx * 0.5)) / (rx * 1.05)
+    ny2 = (yy - (cy + ry * 0.55)) / (ry * 1.05)
+    shadow_amt = np.clip(1 - (nx2 ** 2 + ny2 ** 2), 0, 1) ** 1.5
 
-    body = Image.new("RGBA", (s, s), (0, 0, 0, 0))
-    body.paste(tone, (0, 0), mask)
-    canvas.alpha_composite(body)
+    base = np.array([247, 240, 225], dtype=np.float32)
+    highlight = np.array([255, 253, 247], dtype=np.float32)
+    shade = np.array([210, 184, 148], dtype=np.float32)
 
-    rnd = random.Random(42)
-    grains = Image.new("RGBA", (s, s), (0, 0, 0, 0))
-    for _ in range(70):
-        gx = cx + rnd.uniform(-rx * 0.85, rx * 0.85)
-        gy = cy + rnd.uniform(-ry * 0.85, ry * 0.85)
-        nx, ny = (gx - cx) / rx, (gy - cy) / ry
-        if nx * nx + ny * ny > 0.95:
-            continue
-        gw = rnd.uniform(0.05, 0.075) * s
-        gh = gw * rnd.uniform(0.4, 0.48)
-        cell = Image.new("RGBA", (int(gw * 1.6), int(gh * 1.6)), (0, 0, 0, 0))
-        cdraw = ImageDraw.Draw(cell)
-        cxg, cyg = cell.width / 2, cell.height / 2
-        alpha = max(0, 26 + rnd.randint(-10, 18))
-        cdraw.ellipse([cxg - gw / 2, cyg - gh / 2, cxg + gw / 2, cyg + gh / 2], fill=(255, 250, 240, alpha))
-        cell = cell.filter(ImageFilter.GaussianBlur(gh * 0.15))
-        cell = cell.rotate(rnd.uniform(-60, 60), expand=True, resample=Image.BICUBIC)
-        grains.alpha_composite(cell, (int(gx - cell.width / 2), int(gy - cell.height / 2)))
+    rgb = base[None, None, :] * np.ones((s, s, 1), dtype=np.float32)
+    rgb = rgb + (highlight - base)[None, None, :] * light[..., None]
+    rgb = rgb + (shade - base)[None, None, :] * shadow_amt[..., None] * 0.75
+    rgb = np.clip(rgb, 0, 255).astype(np.uint8)
 
-    grains_masked = Image.new("RGBA", (s, s), (0, 0, 0, 0))
-    grains_masked.paste(grains, (0, 0), mask)
-    canvas.alpha_composite(grains_masked)
+    canvas.alpha_composite(Image.fromarray(np.dstack([rgb, np.array(mask)]), "RGBA"))
+
+    # 상단에 모이는 만두 주름(pleats)
+    pleats = Image.new("RGBA", (s, s), (0, 0, 0, 0))
+    pd = ImageDraw.Draw(pleats)
+    knot_x, knot_y = cx, cy - ry * 0.88
+    n_pleats = 8
+    for i in range(n_pleats):
+        t = i / (n_pleats - 1)
+        angle = math.radians(-158 + t * 316)
+        ex = cx + math.cos(angle) * rx * 0.62
+        ey = knot_y + ry * 0.62 + math.sin(angle) * ry * 0.18
+        ctrl_x = cx + math.cos(angle) * rx * 0.32
+        ctrl_y = knot_y + ry * 0.22
+        pts, steps = [], 20
+        for j in range(steps + 1):
+            u = j / steps
+            bx = (1 - u) ** 2 * knot_x + 2 * (1 - u) * u * ctrl_x + u ** 2 * ex
+            by = (1 - u) ** 2 * knot_y + 2 * (1 - u) * u * ctrl_y + u ** 2 * ey
+            pts.append((bx, by))
+        pd.line(pts, fill=(158, 130, 98, 130), width=max(2, int(s * 0.0055)))
+        pts2 = [(px + s * 0.004, py - s * 0.004) for px, py in pts]
+        pd.line(pts2, fill=(255, 250, 240, 120), width=max(1, int(s * 0.003)))
+
+    pd.ellipse(
+        [knot_x - s * 0.03, knot_y - s * 0.022, knot_x + s * 0.03, knot_y + s * 0.036],
+        fill=(230, 210, 182, 255),
+    )
+
+    pleats_masked = Image.new("RGBA", (s, s), (0, 0, 0, 0))
+    pleats_masked.paste(pleats, (0, 0), mask)
+    canvas.alpha_composite(pleats_masked)
+
+    # 촉촉한 찐만두 표면의 하이라이트
+    spec = Image.new("L", (s, s), 0)
+    ImageDraw.Draw(spec).ellipse(
+        [cx - rx * 0.5, cy - ry * 0.8, cx + rx * 0.05, cy - ry * 0.1], fill=95
+    )
+    spec = spec.filter(ImageFilter.GaussianBlur(s * 0.045))
+    spec_masked = Image.new("L", (s, s), 0)
+    spec_masked.paste(spec, (0, 0), mask)
+    spec_layer = Image.new("RGBA", (s, s), (255, 255, 255, 255))
+    spec_layer.putalpha(spec_masked)
+    canvas.alpha_composite(spec_layer)
 
     return _to_data_uri(canvas.resize((size, size), Image.LANCZOS))
 
@@ -173,7 +190,7 @@ def load_html() -> str:
         img_b64 = base64.b64encode(IMAGE_PATH.read_bytes()).decode("utf-8")
         html = html.replace("baby.png", f"data:image/png;base64,{img_b64}")
 
-    html = html.replace("rice.png", make_rice_image())
+    html = html.replace("dimsum.png", make_dimsum_image())
     html = html.replace("chopsticks.png", make_chopsticks_image())
 
     return html
